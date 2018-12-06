@@ -18,7 +18,7 @@ logging.basicConfig(filename='BLSrun.log', level=logging.DEBUG, format='%(asctim
 
 '''CSV file in = KIC id. RA. Dec. Vmag. Median Flux, Tcen,Tdur, depth,SNR,SNR(RN),GoodnessOfFit'''
 
-def mpmain(indirectory, exofopdat, filename='TESS_detns_full.csv', mp=False):
+def mpmain(indirectory, exofopdat=None, filename='TESS_detns_full.csv', mp=False):
     flist=glob.glob(os.path.join(indirectory,'tess*.fits'))
     if mp:
         #multiprocessing
@@ -43,10 +43,10 @@ def mpmain(indirectory, exofopdat, filename='TESS_detns_full.csv', mp=False):
     else:
         Run(flist,filename,exofopdat)
 
-def Run(flist, filename, exofopdat, N=-1):
+def Run(flist, filename, exofopdat=None, N=-1):
 
     #check already used ids
-    if os.path.exists(filename):
+    if os.path.exists(filename) and os.stat(filename).st_size>0:
         usedids = np.genfromtxt(filename,delimiter=',',skip_header=1)[:,0].astype('int')
     else:
         usedids = []
@@ -54,27 +54,36 @@ def Run(flist, filename, exofopdat, N=-1):
     if N!=-1:   #i.e. multiprocessing
         ext = filename[-4:]
         filename=filename.replace(ext,'_'+str(N)+ext)
-
-    exofopinfo = np.genfromtxt(exofopdat, delimiter=',', names=True)
+        
+    if exofopdat is not None:
+        exofopinfo = np.genfromtxt(exofopdat, delimiter=',', names=True)
+    else:
+        exofopinfo = None
 
     logging.debug('Running BLS')       
     
     Kcount = len(usedids)
     for infile in flist:
         lcdat = fits.open(infile)
-        try:
+        if 'TICID' in lcdat[0].header.keys():
             TIC = lcdat[0].header['TICID']
-        except KeyError:
+        elif 'TIC' in lcdat[0].header.keys():
             TIC = int(lcdat[0].header['TIC'])
-        
-        if TIC in exofopinfo['TIC_ID'] and TIC not in usedids:
-            logging.debug('Searching '+str(TIC)+' -   Nlc='+str(Kcount)+'  -   N='+str(N))
-            BLSSearchTESS(lcdat, TIC, flist, N, filename, exofopinfo[exofopinfo['TIC_ID']==TIC])
         else:
-            logging.debug('Cannot search '+str(TIC)+' -  No ExoFop data ')
+            TIC = 0
+        
+        if TIC not in usedids:
+            logging.debug('Searching '+str(TIC)+' -   Nlc='+str(Kcount)+'  -   N='+str(N))
+            found = False
+            if exofopinfo is not None:
+                if TIC in exofopinfo['TIC_ID']:
+                    found = True
+                    BLSSearchTESS(lcdat, TIC, flist, N, filename, exofopinfo[exofopinfo['TIC_ID']==TIC])
+            if not found:
+                BLSSearchTESS(lcdat, TIC, flist, N, filename)
         Kcount+=1
 
-def BLSSearchTESS(lcdat, TIC, InDirectory, N, filename, info, SNRlimit=3.0, maglim=18.4):
+def BLSSearchTESS(lcdat, TIC, InDirectory, N, filename, info=None, SNRlimit=3.0, maglim=18.4):
     '''Searches TESS lightcurve for transiting planets using BLS.
     '''
     #Getting LC
@@ -82,11 +91,20 @@ def BLSSearchTESS(lcdat, TIC, InDirectory, N, filename, info, SNRlimit=3.0, magl
         lcurve = np.array([lcdat[1].data['TIME'],
     					lcdat[1].data['PDCSAP_FLUX'],
     					lcdat[1].data['PDCSAP_FLUX_ERR']]).T
+    					
     except (NameError,KeyError):
         lcurve = np.array([lcdat[1].data['TIME'],
-    					lcdat[1].data['SAP_FLUX'],
-    					lcdat[1].data['SAP_FLUX']*0.0001]).T
-    qual = lcdat[1].data['QUALITY']
+    					lcdat[1].data['FLUX'],
+    					lcdat[1].data['FLUX']]).T
+    
+        #lcurve = np.array([lcdat[1].data['TIME'],
+    #					lcdat[1].data['SAP_FLUX'],
+    #					lcdat[1].data['SAP_FLUX']*0.0001]).T
+    try:
+        qual = lcdat[1].data['QUALITY']
+    except KeyError:
+        qual = np.zeros(len(lcdat[1].data['TIME']))
+        
     lcdat.close()
     lcurve = lcurve[qual==0,:]
     lcurve = lcurve[lcurve[:,1]>0]
@@ -99,7 +117,11 @@ def BLSSearchTESS(lcdat, TIC, InDirectory, N, filename, info, SNRlimit=3.0, magl
     t0 = lcurve[0,0]
     lcurve[:,0] -= t0
     
-    brightness = info['Tess_Mag'][0]
+    if info is not None:
+        brightness = info['Tess_Mag'][0]
+    else:
+        brightness = maglim - 0.1
+        
     try:
         if np.isnan(brightness):
             brightness=15.555555
@@ -118,7 +140,7 @@ def BLSSearchTESS(lcdat, TIC, InDirectory, N, filename, info, SNRlimit=3.0, magl
         
         #if TIC in [382302241, 235037761, 29857954, 261136679]:
         #if TIC in [52368076]:
-            Out = getBLS(lcurve)   #this is the actual call
+            Out = getBLS(lcurve, TIC, filename, t0=t0)   #this is the actual call
             test= 1
         except TypeError:
             test= 0
@@ -130,22 +152,22 @@ def BLSSearchTESS(lcdat, TIC, InDirectory, N, filename, info, SNRlimit=3.0, magl
         if test!=0:
             logging.debug("Adding "+str(len(Out))+" detections to file for TIC "+str(TIC)+'. N='+str(N))
             #Adding detection to file...
-            import pylab as p
-            p.ion()
-            p.figure(1)
-            p.clf()
-            p.plot(lcurve[:,0],lcurve[:,1],'b.')
-            print(TIC)
+            #import pylab as p
+            #p.ion()
+            #p.figure(1)
+            #p.clf()
+            #p.plot(lcurve[:,0],lcurve[:,1],'b.')
+            #print(TIC)
             
             for run in np.arange(int(np.max(Out[:,3])))+1:
                 runout = Out[Out[:,3]==run]
-                print('Iteration: '+str(run))
-                print(runout[0,:3])
-                print(runout[1,:3])
-                print(runout[2,:3])
+            #    print('Iteration: '+str(run))
+            #    print(runout[0,:3])
+            #    print(runout[1,:3])
+            #    print(runout[2,:3])
                 AddDetnToFile(runout, brightness, TIC, filename)        
-            p.pause(5)
-            input()
+            #p.pause(5)
+            #input()
     else:
         logging.debug('Brightness '+str(info['Tess_Mag'])+' not recognised, or too few datapoints')
 
@@ -155,7 +177,7 @@ def CutTransits(lc,transitt0,transitper,phase1, phase2):
     return lc[~intransit,:]
 
 
-def getBLS(lc, multirunthresh=5.):
+def getBLS(lc, TIC, filename, t0=0, multirunthresh=5.):
     '''Runs BLS search for transits on lightcurve.
     Returns 3-column array (detns) with the position and height of any peaks, and the 2-column spectrum'''
 
@@ -181,6 +203,10 @@ def getBLS(lc, multirunthresh=5.):
 
         #Rescaling both BLS and LS such that the median (of values <0.3*the max value ) is at 1 and the position of a peak gives the height above the median
         PowArr[:, 1] = PowArr[:, 1]/np.median(PowArr[:, 1][PowArr[:, 1]<np.percentile(PowArr[:, 1],95)])
+        if count==0:
+            blsoutfile = filename[:-4]+'_'+str(TIC)+'_'+str(count)+'_pgram.txt' #includes count in case we want to save the others later
+            np.savetxt(blsoutfile, PowArr)
+            
         detnsOut_lccut = getPeaks(PowArr)
         detnsOut_lccut = detnsOut_lccut[(-detnsOut_lccut[:, 1]).argsort(), :]
         detnsOut_lccut = np.hstack((detnsOut_lccut,np.ones([len(detnsOut_lccut[:,0]),1])+count))
@@ -198,20 +224,24 @@ def getBLS(lc, multirunthresh=5.):
         phase2 = in2/float(nb)    
         epoch = lccut[0,0]
         
+        epoch_array = np.zeros([len(detnsOut_lccut[:,0]),1])  #hard to easily extract epoch etc for more than just main peak
+        epoch_array[0] = (epoch+phase1*bper) + t0
+        
         #check if only one transit in middle of lc
         if epoch + (phase1+1)*bper > lccut[-1,0]: 
-            detnmax = multirunthresh+1 #force another run
-            detnsOut_lccut[0,0] = -10. #set peak period to -10
-        
+            detnmax = multirunthresh+1 #force another run, unless we hit max via count
+            detnsOut_lccut[0,0] = -10. #set peak period to -10            
+            
         if count == 0:
-            detnsOut = detnsOut_lccut
+            detnsOut = np.hstack((detnsOut_lccut,epoch_array))
         else:
-            detnsOut = np.vstack((detnsOut,detnsOut_lccut))  
+            detnsOut = np.vstack((detnsOut,np.hstack((detnsOut_lccut,epoch_array))))  
+            
+        count += 1
             
         if detnmax < multirunthresh:
             break
   
-        count += 1
         if count >2:
             break
     
@@ -276,17 +306,16 @@ def AddDetnToFile(ds, brightness, TIC, filename):
     '''
     while ds.shape[0] < 4: #avoid errors if less than 5 detections
         ds = np.vstack((ds,np.zeros(ds.shape[1])))
-    
     if os.path.exists(filename):
         with open(filename,'a') as fd:
             c = csv.writer(fd)
-            c.writerow([TIC,brightness,ds[0,3]]+list(ds[0, :3])+list(ds[1, :3])+list(ds[2, :3])+list(ds[3, :3]))
+            c.writerow([TIC,brightness,ds[0,3],ds[0,0],ds[0,4]]+list(ds[0, 1:3])+[ds[1,0],ds[1,4]]+list(ds[1, 1:3])+[ds[2,0],ds[2,4]]+list(ds[2, 1:3])+[ds[3,0],ds[3,4]]+list(ds[3, 1:3]))
     else:
         #Writing header
         with open(filename, "w") as f:
             c = csv.writer(f)
-            c.writerow(['TICID','TESSMAG','MultiRun','Per_1','Fout_1','SNR_1','Per_2','Fout_2','SNR_2','Per_3','Fout_3','SNR_3','Per_4','Fout_4','SNR_4'])
-            c.writerow([TIC,brightness,ds[0,3]]+list(ds[0, :3])+list(ds[1, :3])+list(ds[2, :3])+list(ds[3, :3]))
+            c.writerow(['TICID','TESSMAG','MultiRun','Per_1','Epoch_1','Fout_1','SNR_1','Per_2','Epoch_2','Fout_2','SNR_2','Per_3','Epoch_3','Fout_3','SNR_3','Per_4','Epoch_4','Fout_4','SNR_4'])
+            c.writerow([TIC,brightness,ds[0,3],ds[0,0],ds[0,4]]+list(ds[0, 1:3])+[ds[1,0],ds[1,4]]+list(ds[1, 1:3])+[ds[2,0],ds[2,4]]+list(ds[2, 1:3])+[ds[3,0],ds[3,4]]+list(ds[3, 1:3]))
 
 def str2bool(input):
     if input in ['y','Y','True','true','1']:
@@ -295,4 +324,8 @@ def str2bool(input):
         return False
 
 if __name__ == '__main__':
-    mpmain(sys.argv[1], sys.argv[2], sys.argv[3], str2bool(sys.argv[4]))
+    print(len(sys.argv))
+    if len(sys.argv)>2:
+        mpmain(sys.argv[1], sys.argv[2], sys.argv[3], str2bool(sys.argv[4]))
+    else:
+        mpmain(sys.argv[1])
